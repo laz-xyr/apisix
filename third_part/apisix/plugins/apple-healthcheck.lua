@@ -34,7 +34,8 @@ local schema = {
     properties = {
         healthcheck_bypass = {type = "boolean", default = false},
         bypass_suffix = {type = "string", enum = {"smp", "smp-dr", "public"},},
-
+        endpoint = {
+            type = "array",items = {type = "string"}},
         upstream = {
             nodes = schema_def.upstream.properties.nodes,
             cert = {
@@ -60,9 +61,9 @@ local schema = {
                 maximum = 254,
                 default = 3
             }
-        }
-        
-    }
+        }      
+    },
+    required = {"endpoint"},
 }
 
 
@@ -89,7 +90,7 @@ local TARGET_COUNTER   = SHM_PREFIX ..  ":counter:"
 local TARGET_LIST      = SHM_PREFIX ..  ":target_list"
 local redis_prefix = "apple:user_identifier:"
 local opts = {
-    ip = "172.19.0.3",
+    ip = "192.168.56.103",
     port = 6379,
     passwd = "123456",
     db = 0,
@@ -102,59 +103,6 @@ local suffix_apple = ".apple.com"
 
 local active_check_timer
 local last_check_ver = 0
-
-function _M.check_schema(conf, schema_type)
-    core.log.info("input conf: ", core.json.delay_encode(conf))
-
-    local ok, err
-    if schema_type == core.schema.TYPE_CONSUMER then
-        ok, err = core.schema.check(consumer_schema, conf)
-    else
-        return core.schema.check(schema, conf)
-    end
-
-    if not ok then
-        return false, err
-    end
-
-    return true
-end
-
-local function key_for(key_prefix, hostname, health_type)
-    return string_format("%s:%s%s", key_prefix, hostname or "",health_type and ":" .. health_type or "")
-end
-
-local function get_token_val_from_redis(domain, header_type)
-    local red = redis:new(opts)
-    if not red then
-        core.log.warn("new redis err")
-        return nil
-    end
-    local exp = red:hget(redis_prefix .. domain , header_type)
-    core.log.info("redis key: ", redis_prefix .. domain, " ",header_type)
-
-    red:set_keepalive(opts.freetime, opts.poolsize)
-    if exp == ngx.null or exp == nil then return nil end
-    return exp
-end
-
-
-local function set_val_to_redis(domain, header1, val1, header2, val2)
-    -- core.log.error("prefix: ", prefix)
-    local red = redis:new(opts)
-    if not red then
-        core.log.warn("new redis err")
-        return nil
-    end
-    local res, err = red:hset(redis_prefix .. domain, header1, val1, header2, val2)
-    if not res then
-        ngx.say("failed to set hset: ", err)
-        return
-    end
-    core.log.warn("redis key: ", redis_prefix .. domain, " ",val1,val2)
-    red:set_keepalive(opts.freetime, opts.poolsize)
-end
-_M.set_val_to_redis = set_val_to_redis
 
 
 local function fetch_target_list()
@@ -170,8 +118,9 @@ _M.fetch_target_list = fetch_target_list
 
 local function add_target_node(domain)
     local target_list = fetch_target_list()
+
     if not target_list[domain] then
-        target_list[domain] = true 
+        target_list[domain] = true
         target_list = serialize(target_list)
         local success, err, forcible = shm:set(TARGET_LIST, target_list)
         if not success or forcible then
@@ -180,6 +129,97 @@ local function add_target_node(domain)
     end
 end
 _M.add_target_node = add_target_node
+
+
+local function clear_target_nodes()
+    local target_list = {}
+    target_list = serialize(target_list)
+    local success, err, forcible = shm:set(TARGET_LIST, target_list)
+    if not success or forcible then
+        core.log.warn("dict no memory: ", err)
+    end
+    core.log.error("clear_target_nodes")
+
+    return success
+end
+
+
+function _M.check_schema(conf, schema_type)
+    core.log.warn("input conf: ", core.json.delay_encode(conf))
+
+    if not shm then
+        core.log.error("need apple-healthcheck shared dict")
+        return false, "need apple-healthcheck shared dict"
+    end
+
+    local ok, err
+    if schema_type == core.schema.TYPE_CONSUMER then
+        ok, err = core.schema.check(consumer_schema, conf)
+    else
+        ok, err = core.schema.check(schema, conf)
+    end
+
+    if not ok then
+        return false, err
+    end
+
+    if ngx_worker_id() == 0 then
+        clear_target_nodes()
+        if not conf._meta or not conf._meta.disable then
+            local endpoint = conf.endpoint or {}
+            if ok and conf.endpoint and #endpoint > 0 then
+                for _, domain in ipairs(endpoint) do
+                    add_target_node(domain)
+                    core.log.info("add_target_node: ", domain)
+                end
+            end
+        end
+    end
+
+    return true
+end
+
+local function key_for(key_prefix, hostname, health_type)
+    return string_format("%s:%s%s", key_prefix, hostname or "",health_type and ":" .. health_type or "")
+end
+
+local function get_val_from_redis(domain, header_type)
+    local red = redis:new(opts)
+    if not red then
+        core.log.warn("new redis err")
+        return nil
+    end
+    local exp = red:hget(redis_prefix .. domain , header_type)
+    core.log.info("redis key: ", redis_prefix .. domain, " ",header_type)
+
+    red:set_keepalive(opts.freetime, opts.poolsize)
+    if exp == ngx.null or exp == nil then return nil end
+    return exp
+end
+
+
+local function set_val_to_redis(domain, ...)
+    -- core.log.error("prefix: ", prefix)
+    local red = redis:new(opts)
+    if not red then
+        core.log.error("new redis err")
+        return false, "new redis err"
+    end
+    local res, err = red:hset(redis_prefix .. domain, ...)
+    if not res then
+        core.log.error("failed to set hset: ", err)
+        return false, "failed to set hset: " .. err
+    end
+    core.log.warn("redis key: ", redis_prefix .. domain,...)
+    red:set_keepalive(opts.freetime, opts.poolsize)
+    return true
+end
+_M.set_val_to_redis = set_val_to_redis
+
+
+
+
+
 
 local function report_http_status(domain, status, limit)
     local state_key = key_for(TARGET_STATE, domain)
@@ -366,21 +406,16 @@ function _M.access(conf, ctx)
         return 400, "required x-user-identifier header"
     end
 
-    local x_device_oem_host = get_token_val_from_redis(user_identifier,"x_device_oem_host") 
-    local x_pod = get_token_val_from_redis(user_identifier,"x_pod")
+    local region = get_val_from_redis(user_identifier,"region") 
+    local pod = get_val_from_redis(user_identifier,"pod")
     
-    if not x_device_oem_host or not x_pod then
-        return 400, "identifier缺少关联的device_oem_host"
-    end
-    local regex = "^(.*)-[^-]*$"
-    local match = ngx.re.match(x_device_oem_host or x_pod , regex)
-
-    if not match then
-        return 400, "域名不匹配"
+    if not region and not pod then
+        return 400, "identifier缺少关联的region and pod"
     end
 
-    local prefix_without_smp = match[1]
-    local prefix_with_dr = prefix_without_smp .. "-smp-dr"
+    local prefix_without_smp = "cn-apple-pay-gateway-" .. region .. "-" .. pod
+    local prefix_with_smp = prefix_without_smp .. "-smp"
+    local prefix_with_dr = prefix_with_smp .. "-dr"
 
     local upstreams = {}
 
@@ -389,7 +424,7 @@ function _M.access(conf, ctx)
 
     if not conf.healthcheck_bypass then
         upstreams = {
-            x_device_oem_host,
+            prefix_with_smp .. suffix_apple,
             prefix_with_dr .. suffix_apple,
             prefix_without_smp .. suffix_apple
         }
@@ -399,7 +434,7 @@ function _M.access(conf, ctx)
     for _, domain in ipairs(upstreams) do
     
         local state_key = key_for(TARGET_STATE, domain)
-        local value, flags = shm:get(state_key)
+        local value, _ = shm:get(state_key)
         core.log.info(state_key, ": ", value)
 
         if not value then
@@ -407,7 +442,6 @@ function _M.access(conf, ctx)
             if not success or forcible then
                 core.log.warn("dict no memory: ", err)
             end
-            add_target_node(domain)
 
         elseif value == "healthy" then
             found = true

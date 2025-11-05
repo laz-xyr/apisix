@@ -76,7 +76,7 @@ local _M = {
 -- constants
 local SHM_PREFIX = "apple-healthcheck"
 local shm = ngx.shared["apple-healthcheck"]
-
+local Region = {["sh"]= true,["tj"]=true}
 
 function _M.check_schema(conf, schema_type)
     core.log.info("input conf: ", core.json.delay_encode(conf))
@@ -117,30 +117,20 @@ function _M.access(conf, ctx)
         return 400, "required x-pod header"
     end
 
-    apple_health.set_val_to_redis(user_identifier,"x_device_oem_host",x_device_oem_host,"x_pod",x_pod)
 
 
-    local regex = "^(.*)-[^-]*$"
+
+    local regex = "^(.*)-([^-]*)-([^-]*)-smp(?:-(dr))?[^-]*$"
     local match = ngx.re.match(x_device_oem_host or x_pod , regex)
 
     if not match then
         return 400, "域名不匹配"
     end
+    core.log.warn("apple-healthcheck match: ",match[1]," ",match[2]," ",match[3]," ",match[4])
+    local is_dr = match[4] and true or false
 
-    local prefix_without_smp = match[1]
-    local prefix_with_dr = prefix_without_smp .. "-smp-dr"
-
-    local upstreams = {
-        x_device_oem_host,
-        prefix_with_dr .. ".apple.com",
-        prefix_without_smp .. ".apple.com"
-    }
-
-    for _, domain in ipairs(upstreams) do
-        apple_health.add_target_node(domain)
-    end
-
-    core.log.warn("apple-healthcheck target_list: ",core.json.delay_encode(apple_health.fetch_target_list(), true))
+    apple_health.set_val_to_redis(user_identifier,"x_device_oem_host",x_device_oem_host,"x_pod",x_pod,"region"
+    ,match[2],"pod",match[3],"is_dr",is_dr)
 
 end
 
