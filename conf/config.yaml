@@ -1,7 +1,12 @@
 ---
+redis:
+  ip: 192.168.56.103
+  port: 6379
+  passwd: 123456
+  db: 0
 plugins:
-- apple-healthcheck-ingress
-- apple-healthcheck
+- applehealthcheck2dk
+- applehealthcheck2apple
 - real-ip
 - ai
 - client-control
@@ -207,11 +212,12 @@ nginx_config:
       plugin-api-breaker: 10m
       tracing_buffer: 10m
       tars: 1m
+    custom_lua_shared_dict:
+      apple-healthcheck: 10m
     real_ip_from:
     - 127.0.0.1
     - 'unix:'
-    custom_lua_shared_dict:
-      apple-healthcheck: 10m
+
   stream:
     access_log: logs/access_stream.log
     access_log_format: $remote_addr [$time_local] $protocol $status $bytes_sent $bytes_received

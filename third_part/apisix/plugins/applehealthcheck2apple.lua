@@ -19,9 +19,12 @@ local string_format = string.format
 local ngx_worker_id = ngx.worker.id
 local redis = require ("redis")
 local ngx      = ngx
-local plugin_name = "apple-healthcheck"
+local plugin_name = "applehealthcheck2apple"
 local schema_def = require("apisix.schema_def")
 local cjson = require("cjson.safe").new()
+local local_conf = require('apisix.core.config_local').local_conf()
+
+
 
 -- serialize a table to a string
 local serialize = cjson.encode
@@ -34,34 +37,7 @@ local schema = {
     properties = {
         healthcheck_bypass = {type = "boolean", default = false},
         bypass_suffix = {type = "string", enum = {"smp", "smp-dr", "public"},},
-        endpoint = {
-            type = "array",items = {type = "string"}},
-        upstream = {
-            nodes = schema_def.upstream.properties.nodes,
-            cert = {
-                type = "string", minLength = 128, maxLength = 64*1024
-            },
-            key =  {
-                type = "string", minLength = 128, maxLength = 64*1024
-            }
-        },
-        check = {
-            https_verify_certificate = {type = "boolean", default = false},
-            interval = {type = "integer", minimum = 1, default = 10},
-            timeout = {type = "number", default = 5},
-            http_successes = {
-                type = "integer",
-                minimum = 1,
-                maximum = 254,
-                default = 3
-            },
-            http_failures = {
-                type = "integer",
-                minimum = 1,
-                maximum = 254,
-                default = 3
-            }
-        }      
+        endpoint = { type = "array",items = {type = "string"}}
     },
     required = {"endpoint"},
 }
@@ -85,15 +61,17 @@ local _M = {
 -- constants
 local SHM_PREFIX = "apple-healthcheck"
 local shm = ngx.shared["apple-healthcheck"]
+
+
 local TARGET_STATE     = SHM_PREFIX ..  ":state"
 local TARGET_COUNTER   = SHM_PREFIX ..  ":counter:"
 local TARGET_LIST      = SHM_PREFIX ..  ":target_list"
 local redis_prefix = "apple:user_identifier:"
 local opts = {
-    ip = "192.168.56.103",
-    port = 6379,
-    passwd = "123456",
-    db = 0,
+    ip =  local_conf.redis.ip,
+    port = local_conf.redis.port,
+    passwd = local_conf.redis.passwd,
+    db = local_conf.redis.db,
     timeout = 1000,
     poolsize = 100,
     freetime = 30000
@@ -138,14 +116,13 @@ local function clear_target_nodes()
     if not success or forcible then
         core.log.warn("dict no memory: ", err)
     end
-    core.log.error("clear_target_nodes")
+    core.log.info("clear_target_nodes")
 
     return success
 end
 
 
 function _M.check_schema(conf, schema_type)
-    core.log.warn("input conf: ", core.json.delay_encode(conf))
 
     if not shm then
         core.log.error("need apple-healthcheck shared dict")
@@ -167,7 +144,7 @@ function _M.check_schema(conf, schema_type)
         clear_target_nodes()
         if not conf._meta or not conf._meta.disable then
             local endpoint = conf.endpoint or {}
-            if ok and conf.endpoint and #endpoint > 0 then
+            if  conf.endpoint and #endpoint > 0 then
                 for _, domain in ipairs(endpoint) do
                     add_target_node(domain)
                     core.log.info("add_target_node: ", domain)
@@ -179,38 +156,50 @@ function _M.check_schema(conf, schema_type)
     return true
 end
 
-local function key_for(key_prefix, hostname, health_type)
-    return string_format("%s:%s%s", key_prefix, hostname or "",health_type and ":" .. health_type or "")
+local function key_for(key_prefix, hostname)
+    return string_format("%s:%s", key_prefix, hostname or "")
 end
 
-local function get_val_from_redis(domain, header_type)
+local function get_val_from_redis(domain)
     local red = redis:new(opts)
     if not red then
         core.log.warn("new redis err")
-        return nil
+        return nil, nil, "redis connect err"
     end
-    local exp = red:hget(redis_prefix .. domain , header_type)
-    core.log.info("redis key: ", redis_prefix .. domain, " ",header_type)
+    local region = red:hget(redis_prefix .. domain , "region")
+    local pod = red:hget(redis_prefix .. domain , "pod")
+
 
     red:set_keepalive(opts.freetime, opts.poolsize)
-    if exp == ngx.null or exp == nil then return nil end
-    return exp
+    local res = ""
+    if region ~= ngx.null and region ~= nil and pod ~= "" then 
+        res = res .. "-" .. region
+    end
+
+    if pod ~= ngx.null and pod ~= nil and pod ~= "" then 
+        res = res .. "-" .. pod
+    end
+    core.log.info("redis key: ", redis_prefix .. domain, " ",res)
+    if res == "" then
+        return nil
+    end
+    return res
 end
 
 
 local function set_val_to_redis(domain, ...)
     -- core.log.error("prefix: ", prefix)
-    local red = redis:new(opts)
+    local red, err = redis:new(opts)
     if not red then
-        core.log.error("new redis err")
-        return false, "new redis err"
+        core.log.error("redis err: ", err)
+        return false, "redis connect err"
     end
     local res, err = red:hset(redis_prefix .. domain, ...)
     if not res then
         core.log.error("failed to set hset: ", err)
         return false, "failed to set hset: " .. err
     end
-    core.log.warn("redis key: ", redis_prefix .. domain,...)
+    core.log.info("redis key: ", redis_prefix .. domain, ...)
     red:set_keepalive(opts.freetime, opts.poolsize)
     return true
 end
@@ -225,9 +214,9 @@ local function report_http_status(domain, status, limit)
     local state_key = key_for(TARGET_STATE, domain)
     local old_status, flags = shm:get(state_key)
     if not old_status then
-        local _, err = shm:safe_set(state_key, status or "healthy")
+        local _, err = shm:safe_set(state_key,"healthy")
         if err then
-            core.log.warn("dict set err: ", err)
+            core.log.error("dict set err: ", err)
         end
         if status == "healthy" then
             return
@@ -258,9 +247,9 @@ local function report_http_status(domain, status, limit)
             status_change = true
         else
             local multictr, err = shm:incr(counter_key, 1, 0)
-            core.log.warn(domain," fali counter: ", multictr)
+            core.log.info(domain," fali counter: ", multictr)
             if err then
-                core.log.warn("COUNTER err: ",err)
+                core.log.error("COUNTER err: ",err)
                 return nil
             end
             if multictr and multictr > 2 then
@@ -282,53 +271,110 @@ local function report_http_status(domain, status, limit)
 end
 
 local cert = [[-----BEGIN CERTIFICATE-----
-MIIDUzCCAjugAwIBAgIURw+Rc5FSNUQWdJD+quORtr9KaE8wDQYJKoZIhvcNAQEN
-BQAwWDELMAkGA1UEBhMCY24xEjAQBgNVBAgMCUd1YW5nRG9uZzEPMA0GA1UEBwwG
-Wmh1SGFpMRYwFAYDVQQDDA1jYS5hcGlzaXguZGV2MQwwCgYDVQQLDANvcHMwHhcN
-MjIxMjAxMTAxOTU3WhcNNDIwODE4MTAxOTU3WjBOMQswCQYDVQQGEwJjbjESMBAG
-A1UECAwJR3VhbmdEb25nMQ8wDQYDVQQHDAZaaHVIYWkxGjAYBgNVBAMMEWNsaWVu
-dC5hcGlzaXguZGV2MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzypq
-krsJ8MaqpS0kr2SboE9aRKOJzd6mY3AZLq3tFpio5cK5oIHkQLfeaaLcd4ycFcZw
-FTpxc+Eth6I0X9on+j4tEibc5IpDnRSAQlzHZzlrOG6WxcOza4VmfcrKqj27oodr
-oqXv05r/5yIoRrEN9ZXfA8n2OnjhkP+C3Q68L6dBtPpv+e6HaAuw8MvcsEo+MQwu
-cTZyWqWT2UzKVzToW29dHRW+yZGuYNWRh15X09VSvx+E0s+uYKzN0Cyef2C6VtBJ
-KmJ3NtypAiPqw7Ebfov2Ym/zzU9pyWPi3P1mYPMKQqUT/FpZSXm4iSy0a5qTYhkF
-rFdV1YuYYZL5YGl9aQIDAQABox8wHTAbBgNVHREEFDASghBhZG1pbi5hcGlzaXgu
-ZGV2MA0GCSqGSIb3DQEBDQUAA4IBAQBepRpwWdckZ6QdL5EuufYwU7p5SIqkVL/+
-N4/l5YSjPoAZf/M6XkZu/PsLI9/kPZN/PX4oxjZSDH14dU9ON3JjxtSrebizcT8V
-aQ13TeW9KSv/i5oT6qBmj+V+RF2YCUhyzXdYokOfsSVtSlA1qMdm+cv0vkjYcImV
-l3L9nVHRPq15dY9sbmWEtFBWvOzqNSuQYax+iYG+XEuL9SPaYlwKRC6eS/dbXa1T
-PPWDQad2X/WmhxPzEHvjSl2bsZF1u0GEdKyhXWMOLCLiYIJo15G7bMz8cTUvkDN3
-6WaWBd6bd2g13Ho/OOceARpkR/ND8PU78Y8cq+zHoOSqH+1aly5H
+MIIFJzCCBA+gAwIBAgIIELnfS9XoEk0wDQYJKoZIhvcNAQELBQAwezE1MDMGA1UE
+AwwsQXBwbGUgQ29ycG9yYXRlIEV4dGVybmFsIEF1dGhlbnRpY2F0aW9uIENBIDEx
+IDAeBgNVBAsMF0NlcnRpZmljYXRpb24gQXV0aG9yaXR5MRMwEQYDVQQKDApBcHBs
+ZSBJbmMuMQswCQYDVQQGEwJVUzAeFw0yNTA4MjEwNTU1MjdaFw0yNjA5MTUxOTU1
+MTNaMIH3MSswKQYKCZImiZPyLGQBAQwbaWRlbnRpdHk6aWRtcy5ncm91cC4xMzQ2
+MDQzMTEwLwYDVQQDDChPUkctN2NjYzE3NmUtYWFlYi00MDIzLWFkNGItZTAwYmFl
+ZGVmZWQ1MSUwIwYDVQQLDBxtYW5hZ2VtZW50OmlkbXMuZ3JvdXAuNzI2NjA0MUkw
+RwYDVQQKDEBHcmVhdCBXYWxsIE1vdG9yIENvbXBhbnkgOjo6ZmIxZDg1NjQtNTU3
+OS00ZmE4LThmNTItZDNhY2Y5NWE1ZmMzMSMwIQYKCZImiZPyLGQBGRYTQ2VydGlm
+aWNhdGUgTWFuYWdlcjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAL5M
+OAaIen27+PRwZfe9glkUhBabx/WQxSJRqUnWbEZ8hLegKvaWZBMTVn/hxVCEoXzI
+vyoQuv58Z3Vmwf9iCSRdmvsC7BJu+gAos9TwZo7ZJTFGppJd0MaNYxCym6F0rLN1
+sF13fZFmiBJVX+6IXD5005hT0bSfyTnL1HfBHobGC2PELPo1vV0ZWf244c7Jubti
+4Ga08JRDQOnintuEG6oiGP7Xt6MqBM1VkaYgJsrby9RYwpDnV7C6jKn+7zF57Wmr
+1yxoGHItQv1lcVYQuB2I1e5nKJ1XfBO22ukoi+2ss3ICFma0lmjdr8NoZ4Aq/SS4
+9gFD0UzURnMegiOPxqMCAwEAAaOCATAwggEsMAwGA1UdEwEB/wQCMAAwHwYDVR0j
+BBgwFoAUWUGmOVO5lKWmGKZWu3QlEtZQYcAwfQYIKwYBBQUHAQEEcTBvMDUGCCsG
+AQUFBzAChilodHRwOi8vY2VydHMuYXBwbGUuY29tL2NvcnBleHRhdXRoY2ExLmRl
+cjA2BggrBgEFBQcwAYYqaHR0cDovL29jc3AuYXBwbGUuY29tL29jc3AwMy1jb3Jw
+ZXh0YXV0aDAyMBMGA1UdJQQMMAoGCCsGAQUFBwMCMDgGA1UdHwQxMC8wLaAroCmG
+J2h0dHA6Ly9jcmwuYXBwbGUuY29tL2NvcnBleHRhdXRoY2ExLmNybDAdBgNVHQ4E
+FgQUH8a4JCq4bc/d3G6Bbiz8N0IJky4wDgYDVR0PAQH/BAQDAgeAMA0GCSqGSIb3
+DQEBCwUAA4IBAQCYivNQmFDh1UQJgdENTA6AnoTvGhTg3NCNoxJYDuZIF/zKXxCI
+Q5LTZ3C8dRG5Q20+vV7Sxh43TjrUrbxZyKQYZWzKgAYCkSQv1dtmeFUbYlf+YEo3
+xv/yh1SzymH1weflJTQnLDkJED1T8quNfu0cbZJRRoxZI6nInSHEoDftYiVAW07o
+DEeX8Q2OaU4EUZ3rw8YYlulMuwe95c5EghE/69/u0tvA3uO+Ba7QgxDuESgnc1gX
+uqG9a4g5MjwzTOJfuwNXNISJmSAiBLD3qexi/uaLseFpPd2kuhUNZhb3SuO8Okbf
+Fli/3CAbuqnk/KrFs1gcngoqiU3BOV/+NkCq
 -----END CERTIFICATE-----
-]]
+-----BEGIN CERTIFICATE-----
+MIIEVDCCAzygAwIBAgIIF4vODdrr46AwDQYJKoZIhvcNAQELBQAwZjEgMB4GA1UE
+AwwXQXBwbGUgQ29ycG9yYXRlIFJvb3QgQ0ExIDAeBgNVBAsMF0NlcnRpZmljYXRp
+b24gQXV0aG9yaXR5MRMwEQYDVQQKDApBcHBsZSBJbmMuMQswCQYDVQQGEwJVUzAe
+Fw0xMzEwMzAyMjA2MjFaFw0yOTA3MTcxOTIwNDVaMHsxNTAzBgNVBAMMLEFwcGxl
+IENvcnBvcmF0ZSBFeHRlcm5hbCBBdXRoZW50aWNhdGlvbiBDQSAxMSAwHgYDVQQL
+DBdDZXJ0aWZpY2F0aW9uIEF1dGhvcml0eTETMBEGA1UECgwKQXBwbGUgSW5jLjEL
+MAkGA1UEBhMCVVMwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCiJgVj
+YR/T0LyNvndubeEsRn22T5PHWMV29gPV2UonspETuSoFLrlZTTt7iRgJm0pQTPX3
+sxzOTCsSloFrNv4kC9KNNEg97YMU9ndpXEGTtvRyviWQ2IC6yWu6a0nU1JZqAurf
+B+bUUGc7R2HGYnhrzjBB1vbg051rq4AYLpbZxMldQZkHuBzcflrnZErqr9EYfPkJ
+Xht+s4PDxum1t/H+5+bNlskM3a/Ip+usZnGjEPqSRvQm5yc2CApE6qVU/8TTlVla
+y2S2QW9/zNM6hz+IBHOYN59/xSLLZe2U7OA6DVmmEUZt9zkit1h2m60l0KtgNQ5k
+heWX574nFkOl91tpAgMBAAGjgfAwge0wQQYIKwYBBQUHAQEENTAzMDEGCCsGAQUF
+BzABhiVodHRwOi8vb2NzcC5hcHBsZS5jb20vb2NzcDA0LWNvcnByb290MB0GA1Ud
+DgQWBBRZQaY5U7mUpaYYpla7dCUS1lBhwDASBgNVHRMBAf8ECDAGAQH/AgEAMB8G
+A1UdIwQYMBaAFDUgJs6FvkkmIAHdyO7/PWjI0N/1MDIGA1UdHwQrMCkwJ6AloCOG
+IWh0dHA6Ly9jcmwuYXBwbGUuY29tL2NvcnByb290LmNybDAOBgNVHQ8BAf8EBAMC
+AQYwEAYKKoZIhvdjZAYYAwQCBQAwDQYJKoZIhvcNAQELBQADggEBAIvOsQYQhJlo
+ObZTuK47qD5SFaqqjm8HKaH6gQS7FsQLmk5h2hDEK10dZQhpCu901iYPaadjQrYT
+RDLwlZm5oLR5PowgNt9RxJ2tGYdcpo6xp93c51N0Z5Ejf9BJth1qUsTKfjm5GVgP
+RokeWVs92M3ONiMjInKN2tgJoAJxoBU9kMaJ65fjf/ZLl7GbXBtcTbzd2dyhQtxp
+Z7ABXffXw26iSKGXUH0hSi0wGupADyzo2ltuGclrVw0E5G4GE2n5irnVZHZsFeWT
+OA+f4lZe99Q3xssczEyXKJy5qlk1y1gtp78+RPrNTHZMtphxCxCbFBAItYELh8Fs
+LnwFyrOU85A=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDsTCCApmgAwIBAgIIFJlrSmrkQKAwDQYJKoZIhvcNAQELBQAwZjEgMB4GA1UE
+AwwXQXBwbGUgQ29ycG9yYXRlIFJvb3QgQ0ExIDAeBgNVBAsMF0NlcnRpZmljYXRp
+b24gQXV0aG9yaXR5MRMwEQYDVQQKDApBcHBsZSBJbmMuMQswCQYDVQQGEwJVUzAe
+Fw0xMzA3MTYxOTIwNDVaFw0yOTA3MTcxOTIwNDVaMGYxIDAeBgNVBAMMF0FwcGxl
+IENvcnBvcmF0ZSBSb290IENBMSAwHgYDVQQLDBdDZXJ0aWZpY2F0aW9uIEF1dGhv
+cml0eTETMBEGA1UECgwKQXBwbGUgSW5jLjELMAkGA1UEBhMCVVMwggEiMA0GCSqG
+SIb3DQEBAQUAA4IBDwAwggEKAoIBAQC1O+Ofah0ORlEe0LUXawZLkq84ECWh7h5O
+7xngc7U3M3IhIctiSj2paNgHtOuNCtswMyEvb9P3Xc4gCgTb/791CEI/PtjI76T4
+VnsTZGvzojgQ+u6dg5Md++8TbDhJ3etxppJYBN4BQSuZXr0kP2moRPKqAXi5OAYQ
+dzb48qM+2V/q9Ytqpl/mUdCbUKAe9YWeSVBKYXjaKaczcouD7nuneU6OAm+dJZcm
+hgyCxYwWfklh/f8aoA0o4Wj1roVy86vgdHXMV2Q8LFUFyY2qs+zIYogVKsRZYDfB
+7WvO6cqvsKVFuv8WMqqShtm5oRN1lZuXXC21EspraznWm0s0R6s1AgMBAAGjYzBh
+MB0GA1UdDgQWBBQ1ICbOhb5JJiAB3cju/z1oyNDf9TAPBgNVHRMBAf8EBTADAQH/
+MB8GA1UdIwQYMBaAFDUgJs6FvkkmIAHdyO7/PWjI0N/1MA4GA1UdDwEB/wQEAwIB
+BjANBgkqhkiG9w0BAQsFAAOCAQEAcwJKpncCp+HLUpediRGgj7zzjxQBKfOlRRcG
++ATybdXDd7gAwgoaCTI2NmnBKvBEN7x+XxX3CJwZJx1wT9wXlDy7JLTm/HGa1M8s
+Errwto94maqMF36UDGo3WzWRUvpkozM0mTcAPLRObmPtwx03W0W034LN/qqSZMgv
+1i0use1qBPHCSI1LtIQ5ozFN9mO0w26hpS/SHrDGDNEEOjG8h0n4JgvTDAgpu59N
+CPCcEdOlLI2YsRuxV9Nprp4t1WQ4WMmyhASrEB3Kaymlq8z+u3T0NQOPZSoLu8cX
+akk0gzCSjdeuldDXI6fjKQmhsTTDlUnDpPE2AAnTpAmt8lyXsg==
+-----END CERTIFICATE-----]]
 
 local key =[[-----BEGIN RSA PRIVATE KEY-----
-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
+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
 -----END RSA PRIVATE KEY-----
 ]]
 
@@ -340,7 +386,7 @@ local function create_timer()
             if premature then
                 return
             end
-            core.log.warn("apple-healthcheck timer strat")
+            core.log.info("apple-healthcheck timer strat")
             local target_list = fetch_target_list()
 
             if not target_list then
@@ -353,7 +399,7 @@ local function create_timer()
                 local ok, err = httpc:connect({
                     scheme = "https",
                     host = upstream,
-                    port = 9443,
+                    port = 443,
                     ssl_verify = false,
                     ssl_cert = cert,
                     ssl_key = key
@@ -367,14 +413,14 @@ local function create_timer()
             
                 do
                     local res, err = httpc:request{
-                        path = "/headers",
+                        path = "/partner/healthcheck",
                         headers = {
                             ["Host"] =upstream,
                             ["Connection"] = "close"
                         },
                     }
                     if not res then
-                        core.log.warn("apple-healthcheck request error: ",err)
+                        core.log.info("apple-healthcheck request error: ",err)
                         report_http_status(upstream, "unhealthy")
                         goto continue
                     elseif res and res.status == 200 then
@@ -398,36 +444,58 @@ function _M.access(conf, ctx)
 
     if not shm then
         core.log.error("need apple-healthcheck shared dict")
-        return
+        conf.healthcheck_bypass = true
+        conf.bypass_suffix = "public"
     end
 
     local user_identifier = core.request.header(ctx, "x-user-identifier")
     if not user_identifier then
-        return 400, "required x-user-identifier header"
+        return 400, '{"message":"required x-user-identifier header"}'
     end
 
-    local region = get_val_from_redis(user_identifier,"region") 
-    local pod = get_val_from_redis(user_identifier,"pod")
+    local region_pod, err = get_val_from_redis(user_identifier) 
     
-    if not region and not pod then
-        return 400, "identifier缺少关联的region and pod"
+    if err then
+        return 500, '{"message":"Internal Server Error: fali get value form redis"}'
     end
 
-    local prefix_without_smp = "cn-apple-pay-gateway-" .. region .. "-" .. pod
-    local prefix_with_smp = prefix_without_smp .. "-smp"
-    local prefix_with_dr = prefix_with_smp .. "-dr"
+    local prefix_without_smp
+    if not region_pod then
+        local x_pod = core.request.header(ctx, "x-pod")
+        local regex = "^(.*?)(?=-smp|-smp-dr|$)(-smp)?(-dr)?$"
+        local match = ngx.re.match(x_pod or "", regex)
+    
+        if not match then
+            return 400, '{"message":"identifier关联的x_pod不存在"}'
+        end
+        prefix_without_smp = match[1]
+        core.log.error(match[1])
+
+    else
+        prefix_without_smp = "cn-apple-pay-gateway" ..  region_pod
+    end
 
     local upstreams = {}
-
+    local temp_upstreams = {
+        prefix_without_smp .. "-smp" .. suffix_apple,
+        prefix_without_smp .. "-smp-dr" .. suffix_apple,
+        prefix_without_smp .. suffix_apple
+    }
+    
     local upstream
     local found = false
 
     if not conf.healthcheck_bypass then
-        upstreams = {
-            prefix_with_smp .. suffix_apple,
-            prefix_with_dr .. suffix_apple,
-            prefix_without_smp .. suffix_apple
-        }
+        local target_list = fetch_target_list()
+        for _, key in ipairs(temp_upstreams) do
+            if target_list[key] then  -- 检查是否在endpoint配置
+                table.insert(upstreams, key)
+            end
+        end
+    end
+
+    if not upstreams or #upstreams == 0 then
+        return 400, '{"message":"identifier关联的' .. prefix_without_smp .. '无效或者不存在"}'
     end
 
 
@@ -456,13 +524,12 @@ function _M.access(conf, ctx)
         local suffix = suffix_location[conf.bypass_suffix] or ""
         upstream = prefix_without_smp .. suffix   ..  suffix_apple
     end
-    
-    core.log.warn("apple-healthcheck: ",upstream)
+
 
     ctx.matched_route.value.upstream.nodes ={
         {
                 host = upstream,
-                port = 9080,
+                port = 443,
                 weight = last_check_ver,  -- 防止新旧node的值相同
                 priority = 0
         }
