@@ -553,12 +553,12 @@ end
 local function fetch_healtheck_status()
     local target_list = fetch_target_list()
 
-    for domain, _ in ipairs(target_list) do
+    for domain, _ in pairs(target_list) do
         local state_key = key_for(TARGET_STATE, domain)
         local value, _ = shm:get(state_key)
         target_list[domain] = value and value or "healthy"
     end
-
+    core.response.set_header("Content-Type", "application/json")
     core.response.exit(200, target_list)
 
 end
