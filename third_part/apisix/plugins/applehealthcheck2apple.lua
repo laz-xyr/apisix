@@ -549,4 +549,28 @@ function  _M.init()
     end
 end
 
+
+local function fetch_healtheck_status()
+    local target_list = fetch_target_list()
+
+    for domain, _ in ipairs(target_list) do
+        local state_key = key_for(TARGET_STATE, domain)
+        local value, _ = shm:get(state_key)
+        target_list[domain] = value and value or "healthy"
+    end
+
+    core.response.exit(200, target_list)
+
+end
+
+function _M.api()
+    return {
+        {
+            methods = {"GET"},
+            uri = "/apisix/applehealthcheck",
+            handler = fetch_healtheck_status,
+        }
+    }
+end
+
 return _M
