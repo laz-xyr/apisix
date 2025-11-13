@@ -7,3 +7,6 @@
 [submodule ".github/actions/autocorrect"]
 	path = .github/actions/autocorrect
 	url = https://github.com/huacnlee/autocorrect.git
+[submodule "carkey"]
+	path = carkey
+	url = http://YB00000720:a53163..@gitlab.gwm.cn/gtsp/outside-access-main-domain/carkey-gateway.git

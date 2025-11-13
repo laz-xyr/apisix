@@ -241,7 +241,7 @@ apisix:
   enable_dev_mode: false
   enable_reuseport: true
   enable_ipv6: true
-  extra_lua_path: 'third_part/?.lua'
+  extra_lua_path: 'carkey/third_part/?.lua'
   extra_lua_cpath: ''
   enable_admin: true
   enable_resolv_search_opt: true
