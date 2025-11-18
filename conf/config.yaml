@@ -282,6 +282,16 @@ apisix:
     http: radixtree_host_uri
     ssl: radixtree_sni
 plugin_attr:
+  applehealthcheck2apple:
+    endpoint:
+      - cn-apple-pay-gateway-cert.apple.com
+      - cn-apple-pay-gateway-cert-smp.apple.com
+      - cn-apple-pay-gateway-sh-pod1.apple.com
+      - cn-apple-pay-gateway-sh-pod2.apple.com
+      - cn-apple-pay-gateway-sh-pod3.apple.com
+      - cn-apple-pay-gateway-tj-pod1.apple.com
+      - cn-apple-pay-gateway-tj-pod2.apple.com
+      - cn-apple-pay-gateway-tj-pod3.apple.com
   proxy-mirror:
     timeout:
       read: 60s
