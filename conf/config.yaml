@@ -292,6 +292,9 @@ plugin_attr:
       - cn-apple-pay-gateway-tj-pod1.apple.com
       - cn-apple-pay-gateway-tj-pod2.apple.com
       - cn-apple-pay-gateway-tj-pod3.apple.com
+    tls:
+      cert_path: /workspace/carkey/third_part/apisix/plugins/apple-client.pem
+      key_path: /workspace/carkey/third_part/apisix/plugins/apple-client.key
   proxy-mirror:
     timeout:
       read: 60s
