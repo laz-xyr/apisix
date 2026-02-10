@@ -155,6 +155,13 @@ local schema = {
                 "pass to allow the request regardless."
         },
         public_key = {type = "string"},
+        use_jwks = {
+            type = "boolean",
+            default = false,
+            description = "If true and if `public_key` is not set, use the JWKS to verify JWT " ..
+                "signature and skip token introspection in client credentials flow. The JWKS " ..
+                "endpoint is parsed from the discovery document."
+        },
         token_signing_alg_values_expected = {type = "string"},
         use_pkce = {
             description = "when set to true the PKCE(Proof Key for Code Exchange) will be used.",
@@ -681,7 +688,7 @@ function _M.rewrite(plugin_conf, ctx)
         end
 
         -- Authenticate the request. This will validate the access token if it
-        -- is stored in a session cookie, and also renew the token if required.
+        -- is stored in a sessions cookie, and also renew the token if required.
         -- If no token can be extracted, the response will redirect to the ID
         -- provider's authorization endpoint to initiate the Relying Party flow.
         -- This code path also handles when the ID provider then redirects to
@@ -731,8 +738,9 @@ function _M.rewrite(plugin_conf, ctx)
             end
 
             -- Add X-Refresh-Token header, maybe.
-            if session.data.refresh_token and conf.set_refresh_token_header then
-                core.request.set_header(ctx, "X-Refresh-Token", session.data.refresh_token)
+            local refresh_token = session:get("refresh_token")
+            if refresh_token and conf.set_refresh_token_header then
+                core.request.set_header(ctx, "X-Refresh-Token", refresh_token)
             end
         end
     end
