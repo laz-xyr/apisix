@@ -17,9 +17,7 @@
 
 services:
   apisix:
-    build:
-      context: ..
-      dockerfile: .devcontainer/Dockerfile
+    image: apisix-1_devcontainer-apisix:latest
     command: sleep infinity
     volumes:
       - ..:/workspace:cached
