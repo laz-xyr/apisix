@@ -1,0 +1,13 @@
+name: my-codex-repo
+version: 0.1.0
+language: zh-CN
+
+defaults:
+  model: gpt-5.2-codex
+  temperature: 0.2
+
+workflows:
+  - name: plan
+    description: 先列计划再执行
+  - name: implement
+    description: 先验证约束再修改代码
